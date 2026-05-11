@@ -1,0 +1,11 @@
+# Environments
+venv/
+env/
+.env
+
+# Python Cache
+__pycache__/
+*.pyc
+
+# Database (Optional, but recommended so you don't push test data)
+db.sqlite3
