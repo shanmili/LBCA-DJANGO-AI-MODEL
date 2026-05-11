@@ -9,6 +9,7 @@ h11==0.16.0
 idna==3.14
 joblib==1.5.3
 numpy==2.2.6
+pandas==2.2.2
 pydantic==2.13.4
 pydantic_core==2.46.4
 scikit-learn==1.7.2
@@ -18,3 +19,5 @@ threadpoolctl==3.6.0
 typing-inspection==0.4.2
 typing_extensions==4.15.0
 uvicorn==0.46.0
+xgboost==2.0.3
+python-dateutil==2.8.2
