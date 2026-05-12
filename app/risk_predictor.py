@@ -1,27 +1,30 @@
 """
 Risk Predictor - Predict student risk with confidence scores and early warning indicators
+PACE-ONLY: Attendance-based warnings removed. Risk is driven entirely by PACE completion.
 """
 import numpy as np
 from typing import Dict, Tuple
 from app.model import model_instance
 from app.data_pipeline import data_pipeline
 
+
 class RiskPredictor:
     """
-    Predict student dropout/performance risk with detailed analysis
+    Predict student dropout/performance risk with detailed analysis.
+    Only uses PACE data — no attendance.
     """
-    
+
     def __init__(self):
         self.risk_thresholds = {
-            'low': (0, 0.3),
-            'medium': (0.3, 0.65),
-            'high': (0.65, 1.0)
+            'low':    (0,    0.3),
+            'medium': (0.3,  0.65),
+            'high':   (0.65, 1.0),
         }
-        
+
     def predict_student_risk(self, student_data: Dict) -> Dict:
         """
-        Predict risk for a single student
-        
+        Predict risk for a single student.
+
         Returns: {
             'student_id': str,
             'risk_probability': float (0-100),
@@ -33,93 +36,85 @@ class RiskPredictor:
             'positive_factors': list
         }
         """
-        # Prepare data
-        prepared = data_pipeline.prepare_student_data(student_data)
-        features = prepared['normalized_features']
-        trends = prepared['trends']
-        features_dict = prepared['features_dict']
-        
-        # Get base prediction from model
+        prepared       = data_pipeline.prepare_student_data(student_data)
+        features       = prepared['normalized_features']
+        trends         = prepared['trends']
+        features_dict  = prepared['features_dict']
+
+        # ── Base model prediction ────────────────────────────────────────────
         try:
             raw_prediction = model_instance.predict(features.tolist())
-            # Normalize to probability (0-1)
-            if isinstance(raw_prediction, list):
-                risk_prob = float(raw_prediction[0]) if raw_prediction else 0.5
-            else:
-                risk_prob = float(raw_prediction)
-            
-            # Clamp to 0-1 range
+            risk_prob = float(raw_prediction[0]) if isinstance(raw_prediction, list) else float(raw_prediction)
             risk_prob = max(0, min(1, risk_prob))
-        except:
-            risk_prob = 0.5  # Default to medium risk if prediction fails
-        
-        # Calculate confidence based on data consistency and warning signals
-        confidence = self._calculate_confidence(prepared, risk_prob)
-        
-        # Identify early warning indicators
-        early_warnings = self._identify_early_warnings(prepared, features_dict)
-        
-        # Identify risk factors and positive factors
-        risk_factors = self._identify_risk_factors(prepared, features_dict)
+        except Exception:
+            # If model fails, derive risk directly from pace (no attendance bias)
+            pace = features_dict['pace_completion_pct']
+            risk_prob = 0.8 if pace < 50 else 0.5 if pace < 70 else 0.2
+
+        # ── Override using PACE if model was trained with attendance features ─
+        # Re-weight: attendance columns are neutral (100 %) so the raw model
+        # output may under-predict. Adjust based on pace directly.
+        pace = features_dict['pace_completion_pct']
+        if pace < 50:
+            risk_prob = max(risk_prob, 0.70)
+        elif pace < 70:
+            risk_prob = max(risk_prob, 0.40)
+        elif pace >= 85:
+            risk_prob = min(risk_prob, 0.30)
+
+        # ── Derived outputs ──────────────────────────────────────────────────
+        confidence      = self._calculate_confidence(prepared, risk_prob)
+        early_warnings  = self._identify_early_warnings(prepared, features_dict)
+        risk_factors    = self._identify_risk_factors(prepared, features_dict)
         positive_factors = self._identify_positive_factors(prepared, features_dict)
-        
-        # Predict approximate drop-off week if high risk
-        drop_week = self._predict_drop_week(prepared) if risk_prob > 0.65 else None
-        
-        # Determine risk level
-        risk_level = self._get_risk_level(risk_prob)
-        
+        drop_week       = self._predict_drop_week(prepared) if risk_prob > 0.65 else None
+        risk_level      = self._get_risk_level(risk_prob)
+
         return {
-            'student_id': prepared['student_id'],
-            'risk_probability': round(risk_prob * 100, 1),
-            'risk_level': risk_level,
-            'confidence': round(confidence * 100, 1),
-            'early_warnings': early_warnings,
+            'student_id':        prepared['student_id'],
+            'risk_probability':  round(risk_prob * 100, 1),
+            'risk_level':        risk_level,
+            'confidence':        round(confidence * 100, 1),
+            'early_warnings':    early_warnings,
             'predicted_drop_week': drop_week,
-            'risk_factors': risk_factors,
-            'positive_factors': positive_factors,
-            'trends': trends
+            'risk_factors':      risk_factors,
+            'positive_factors':  positive_factors,
+            'trends':            trends,
         }
-    
+
     def predict_cohort_risk(self, students_data: list) -> Dict:
-        """
-        Predict risk for multiple students
-        
-        Returns summary statistics and individual predictions
-        """
-        predictions = [self.predict_student_risk(student) for student in students_data]
-        
+        """Predict risk for multiple students and return cohort summary."""
+        predictions = [self.predict_student_risk(s) for s in students_data]
+
         risk_distribution = {
-            'low': len([p for p in predictions if p['risk_level'] == 'low']),
+            'low':    len([p for p in predictions if p['risk_level'] == 'low']),
             'medium': len([p for p in predictions if p['risk_level'] == 'medium']),
-            'high': len([p for p in predictions if p['risk_level'] == 'high'])
+            'high':   len([p for p in predictions if p['risk_level'] == 'high']),
         }
-        
+
         return {
-            'total_students': len(predictions),
+            'total_students':    len(predictions),
             'risk_distribution': risk_distribution,
-            'high_risk_count': risk_distribution['high'],
-            'average_risk': round(np.mean([p['risk_probability'] for p in predictions]), 1),
+            'high_risk_count':   risk_distribution['high'],
+            'average_risk':      round(np.mean([p['risk_probability'] for p in predictions]), 1),
             'average_confidence': round(np.mean([p['confidence'] for p in predictions]), 1),
-            'predictions': predictions,
-            'critical_students': [p for p in predictions if p['risk_level'] == 'high']
+            'predictions':       predictions,
+            'critical_students': [p for p in predictions if p['risk_level'] == 'high'],
         }
-    
+
+    # ── internal helpers ─────────────────────────────────────────────────────
+
     def _calculate_confidence(self, prepared: Dict, risk_prob: float) -> float:
-        """Calculate confidence in the prediction"""
+        """Confidence based solely on PACE signals (no attendance)."""
         features_dict = prepared['features_dict']
-        trends = prepared['trends']
-        
-        confidence = 0.5  # Base confidence
-        
-        # Increase confidence with consistent warning signs
+        trends        = prepared['trends']
+
+        confidence = 0.5  # base
+
         warning_count = 0
-        
         if features_dict['pace_completion_pct'] < 60:
-            warning_count += 1
-        if features_dict['attendance_pct'] < 80:
-            warning_count += 1
-        if features_dict['absences_count'] > 2:
+            warning_count += 2          # strong pace signal
+        elif features_dict['pace_completion_pct'] < 75:
             warning_count += 1
         if features_dict['late_submissions'] > 3:
             warning_count += 1
@@ -127,146 +122,106 @@ class RiskPredictor:
             warning_count += 1
         if trends['pace_direction'] == 'declining':
             warning_count += 1
-        
-        # Multiple consistent warnings increase confidence
+
         confidence += min(warning_count * 0.08, 0.4)
-        
         return max(0, min(1, confidence))
-    
+
     def _identify_early_warnings(self, prepared: Dict, features_dict: Dict) -> list:
-        """Identify early warning indicators"""
+        """PACE-only early warnings — no attendance."""
         warnings = []
-        features_dict = prepared['features_dict']
-        trends = prepared['trends']
-        
-        # PACE warning
-        if features_dict['pace_completion_pct'] < 50:
+        trends   = prepared['trends']
+        pace     = features_dict['pace_completion_pct']
+
+        if pace < 50:
             warnings.append({
-                'type': 'pace_critical',
-                'message': f"PACE completion critically low: {features_dict['pace_completion_pct']}%",
-                'severity': 'critical'
+                'type':     'pace_critical',
+                'message':  f"PACE completion critically low: {pace:.0f}%",
+                'severity': 'critical',
             })
-        elif features_dict['pace_completion_pct'] < 70:
+        elif pace < 70:
             warnings.append({
-                'type': 'pace_low',
-                'message': f"PACE completion below target: {features_dict['pace_completion_pct']}%",
-                'severity': 'high'
+                'type':     'pace_low',
+                'message':  f"PACE completion below target: {pace:.0f}%",
+                'severity': 'high',
             })
-        
-        # Pace trend warning
+
         if trends['pace_direction'] == 'declining':
             warnings.append({
-                'type': 'pace_declining',
-                'message': f"PACE completion trending downward ({trends['pace_trend']:.1f}% per week)",
-                'severity': 'high'
+                'type':     'pace_declining',
+                'message':  f"PACE trending downward ({trends['pace_trend']:.1f}% per record)",
+                'severity': 'high',
             })
-        
-        # Attendance warning
-        if features_dict['attendance_pct'] < 75:
-            warnings.append({
-                'type': 'attendance_critical',
-                'message': f"Attendance critically low: {features_dict['attendance_pct']}%",
-                'severity': 'critical'
-            })
-        elif trends['attendance_info']['risk_level'] == 'medium':
-            warnings.append({
-                'type': 'attendance_concerning',
-                'message': f"Attendance concerning: {trends['attendance_info']['avg']:.0f}%",
-                'severity': 'medium'
-            })
-        
-        # Absence pattern warning
-        if features_dict['absences_count'] >= 3:
-            warnings.append({
-                'type': 'absences_pattern',
-                'message': f"Multiple recent absences: {int(features_dict['absences_count'])} in last 2 weeks",
-                'severity': 'high'
-            })
-        
-        # Subject struggle warning
+
         if trends['declining_subjects']:
             subjects = ', '.join(trends['declining_subjects'])
             warnings.append({
-                'type': 'subject_decline',
-                'message': f"Declining scores in: {subjects}",
-                'severity': 'medium'
+                'type':     'subject_decline',
+                'message':  f"Declining scores in: {subjects}",
+                'severity': 'medium',
             })
-        
-        # Teacher concern
+
         if features_dict['teacher_concern_flag'] > 0.5:
             warnings.append({
-                'type': 'teacher_concern',
-                'message': "Teacher flagged behavioral or academic concerns",
-                'severity': 'high'
+                'type':     'teacher_concern',
+                'message':  "Teacher flagged academic or behavioral concerns",
+                'severity': 'high',
             })
-        
+
         return warnings
-    
+
     def _identify_risk_factors(self, prepared: Dict, features_dict: Dict) -> list:
-        """Identify factors contributing to risk"""
+        """PACE-only risk factors."""
         factors = []
-        trends = prepared['trends']
-        
-        if features_dict['pace_completion_pct'] < 70:
-            factors.append(f"Low PACE completion: {features_dict['pace_completion_pct']}%")
-        if features_dict['attendance_pct'] < 85:
-            factors.append(f"Below-target attendance: {features_dict['attendance_pct']}%")
-        if features_dict['math_score'] < 70:
-            factors.append(f"Math proficiency concerns: {features_dict['math_score']}%")
-        if features_dict['english_score'] < 70:
-            factors.append(f"English proficiency concerns: {features_dict['english_score']}%")
-        if features_dict['absences_count'] > 1:
-            factors.append(f"Recent absences: {int(features_dict['absences_count'])} instances")
+        trends  = prepared['trends']
+        pace    = features_dict['pace_completion_pct']
+
+        if pace < 70:
+            factors.append(f"Low PACE completion: {pace:.0f}%")
         if features_dict['late_submissions'] > 2:
             factors.append(f"Submission delays: {int(features_dict['late_submissions'])} late submissions")
         if trends['pace_direction'] == 'declining':
             factors.append("PACE completion declining trend")
         if features_dict['teacher_concern_flag'] > 0.5:
             factors.append("Teacher reported concerns")
-        
+        if trends['declining_subjects']:
+            factors.append(f"Declining scores in: {', '.join(trends['declining_subjects'])}")
+
         return factors
-    
+
     def _identify_positive_factors(self, prepared: Dict, features_dict: Dict) -> list:
-        """Identify positive factors supporting student success"""
+        """PACE-only positive factors."""
         factors = []
-        
-        if features_dict['pace_completion_pct'] > 80:
-            factors.append(f"Strong PACE completion: {features_dict['pace_completion_pct']}%")
-        if features_dict['attendance_pct'] > 90:
-            factors.append(f"Excellent attendance: {features_dict['attendance_pct']}%")
-        if features_dict['math_score'] > 80:
-            factors.append(f"Strong math performance: {features_dict['math_score']}%")
-        if features_dict['english_score'] > 80:
-            factors.append(f"Strong English performance: {features_dict['english_score']}%")
-        if features_dict['science_score'] > 80:
-            factors.append(f"Strong science performance: {features_dict['science_score']}%")
-        if features_dict['absences_count'] < 1:
-            factors.append("Consistent attendance - no recent absences")
+        pace    = features_dict['pace_completion_pct']
+
+        if pace >= 90:
+            factors.append(f"Excellent PACE completion: {pace:.0f}%")
+        elif pace >= 80:
+            factors.append(f"Strong PACE completion: {pace:.0f}%")
         if features_dict['ontime_submissions'] > 10:
-            factors.append(f"Consistent submission: {int(features_dict['ontime_submissions'])} on-time submissions")
-        
+            factors.append(f"Consistent on-time submissions: {int(features_dict['ontime_submissions'])}")
+
         return factors
-    
+
     def _predict_drop_week(self, prepared: Dict) -> int:
-        """Estimate which week student might drop off"""
-        trends = prepared['trends']
+        """Estimate which week student might drop off based on PACE trend."""
+        trends     = prepared['trends']
         pace_trend = trends['pace_trend']
-        
-        # If declining at -5% per week and currently at 50%, ~10 weeks until 0%
+        pace       = prepared['features_dict']['pace_completion_pct']
+
         if pace_trend < -5:
-            weeks_remaining = max(2, int(-50 / pace_trend))
-            return min(weeks_remaining, 12)  # Cap at 12 weeks
-        
+            weeks_remaining = max(2, int((pace / abs(pace_trend))))
+            return min(weeks_remaining, 12)
+
         return None
-    
+
     def _get_risk_level(self, probability: float) -> str:
-        """Categorize risk probability into level"""
         if probability < 0.3:
             return 'low'
         elif probability < 0.65:
             return 'medium'
         else:
             return 'high'
+
 
 # Global instance
 risk_predictor = RiskPredictor()
