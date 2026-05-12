@@ -1,3 +1,5 @@
+import os
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi import FastAPI, HTTPException
 from typing import List, Optional
 from datetime import datetime
@@ -21,6 +23,26 @@ app = FastAPI(
     title="LBCA AI Monitoring System",
     description="AI-powered student performance monitoring and intervention system",
     version="1.0.0"
+)
+
+allowed_origins = [
+    "http://localhost:5173",
+    "http://localhost:5174",
+    "http://localhost:5177",
+    "http://127.0.0.1:5173",
+]
+
+# Allow your deployed frontend too — set this env var on Render
+extra = os.getenv("ALLOWED_ORIGINS", "")
+if extra:
+    allowed_origins += [o.strip() for o in extra.split(",")]
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=allowed_origins,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 # ==================== BASIC ENDPOINTS ====================
